@@ -1,159 +1,155 @@
-/**
- * This sketch programs the microcode EEPROMs for the 8-bit breadboard computer
- */
-#define SHIFT_DATA 2
-#define SHIFT_CLK 3
-#define SHIFT_LATCH 4
-#define EEPROM_D0 5
-#define EEPROM_D7 12
-#define WRITE_EN 13
+#include <Arduino.h>
 
-#define HLT 0b1000000000000000  // Halt clock
-#define MI  0b0100000000000000  // Memory address register in
-#define RI  0b0010000000000000  // RAM data in
-#define RO  0b0001000000000000  // RAM data out
-#define IO  0b0000100000000000  // Instruction register out
-#define II  0b0000010000000000  // Instruction register in
-#define AI  0b0000001000000000  // A register in
-#define AO  0b0000000100000000  // A register out
-#define EO  0b0000000010000000  // ALU out
-#define SU  0b0000000001000000  // ALU subtract
-#define BI  0b0000000000100000  // B register in
-#define OI  0b0000000000010000  // Output register in
-#define CE  0b0000000000001000  // Program counter enable
-#define CO  0b0000000000000100  // Program counter out
-#define J   0b0000000000000010  // Jump (program counter in)
+// Pin definitions
+#define DATA_PIN 2
+#define CLOCK_PIN 3
+#define LATCH_PIN 4
+#define EEPROM_START 5
+#define EEPROM_END 12
+#define WRITE_ENABLE_PIN 13
 
-uint16_t data[] = {
-  MI|CO,  RO|II|CE,  0,      0,      0,         0, 0, 0,   // 0000 - NOP
-  MI|CO,  RO|II|CE,  IO|MI,  RO|AI,  0,         0, 0, 0,   // 0001 - LDA
-  MI|CO,  RO|II|CE,  IO|MI,  RO|BI,  EO|AI,     0, 0, 0,   // 0010 - ADD
-  MI|CO,  RO|II|CE,  IO|MI,  RO|BI,  EO|AI|SU,  0, 0, 0,   // 0011 - SUB
-  MI|CO,  RO|II|CE,  IO|MI,  AO|RI,  0,         0, 0, 0,   // 0100 - STA
-  MI|CO,  RO|II|CE,  IO|AI,  0,      0,         0, 0, 0,   // 0101 - LDI
-  MI|CO,  RO|II|CE,  IO|J,   0,      0,         0, 0, 0,   // 0110 - JMP
-  MI|CO,  RO|II|CE,  0,      0,      0,         0, 0, 0,   // 0111
-  MI|CO,  RO|II|CE,  0,      0,      0,         0, 0, 0,   // 1000
-  MI|CO,  RO|II|CE,  0,      0,      0,         0, 0, 0,   // 1001
-  MI|CO,  RO|II|CE,  0,      0,      0,         0, 0, 0,   // 1010
-  MI|CO,  RO|II|CE,  0,      0,      0,         0, 0, 0,   // 1011
-  MI|CO,  RO|II|CE,  0,      0,      0,         0, 0, 0,   // 1100
-  MI|CO,  RO|II|CE,  0,      0,      0,         0, 0, 0,   // 1101
-  MI|CO,  RO|II|CE,  AO|OI,  0,      0,         0, 0, 0,   // 1110 - OUT
-  MI|CO,  RO|II|CE,  HLT,    0,      0,         0, 0, 0,   // 1111 - HLT
-};
+// Control signal bit masks
+#define CTRL_HALT      0x8000
+#define CTRL_MEM_IN    0x4000
+#define CTRL_RAM_IN    0x2000
+#define CTRL_RAM_OUT   0x1000
+#define CTRL_INST_OUT  0x0800
+#define CTRL_INST_IN   0x0400
+#define CTRL_REG_A_IN  0x0200
+#define CTRL_REG_A_OUT 0x0100
+#define CTRL_ALU_OUT   0x0080
+#define CTRL_ALU_SUB   0x0040
+#define CTRL_REG_B_IN  0x0020
+#define CTRL_OUTPUT_IN 0x0010
+#define CTRL_PC_ENABLE 0x0008
+#define CTRL_PC_OUT    0x0004
+#define CTRL_JUMP      0x0002
+#define CTRL_FLAGS_IN  0x0001
 
+// Microcode storage for all flag states
+uint16_t microcode[4][16][8];
 
-/*
- * Output the address bits and outputEnable signal using shift registers.
- */
-void setAddress(int address, bool outputEnable) {
-  shiftOut(SHIFT_DATA, SHIFT_CLK, MSBFIRST, (address >> 8) | (outputEnable ? 0x00 : 0x80));
-  shiftOut(SHIFT_DATA, SHIFT_CLK, MSBFIRST, address);
+// Flag states
+#define FLAGS_ZF0_CF0 0
+#define FLAGS_ZF0_CF1 1
+#define FLAGS_ZF1_CF0 2
+#define FLAGS_ZF1_CF1 3
 
-  digitalWrite(SHIFT_LATCH, LOW);
-  digitalWrite(SHIFT_LATCH, HIGH);
-  digitalWrite(SHIFT_LATCH, LOW);
-}
+// Initialize microcode template
+void setupMicrocodeTemplate() {
+    uint16_t baseTemplate[16][8] = {
+        { CTRL_MEM_IN | CTRL_PC_OUT, CTRL_RAM_OUT | CTRL_INST_IN | CTRL_PC_ENABLE, 0, 0, 0, 0, 0, 0 },  // NOP
+        { CTRL_MEM_IN | CTRL_PC_OUT, CTRL_RAM_OUT | CTRL_INST_IN | CTRL_PC_ENABLE, CTRL_INST_OUT | CTRL_MEM_IN, CTRL_RAM_OUT | CTRL_REG_A_IN, 0, 0, 0, 0 },  // LDA
+        { CTRL_MEM_IN | CTRL_PC_OUT, CTRL_RAM_OUT | CTRL_INST_IN | CTRL_PC_ENABLE, CTRL_INST_OUT | CTRL_MEM_IN, CTRL_RAM_OUT | CTRL_REG_B_IN, CTRL_ALU_OUT | CTRL_REG_A_IN | CTRL_FLAGS_IN, 0, 0, 0 },  // ADD
+        { CTRL_MEM_IN | CTRL_PC_OUT, CTRL_RAM_OUT | CTRL_INST_IN | CTRL_PC_ENABLE, CTRL_INST_OUT | CTRL_MEM_IN, CTRL_RAM_OUT | CTRL_REG_B_IN, CTRL_ALU_OUT | CTRL_REG_A_IN | CTRL_ALU_SUB | CTRL_FLAGS_IN, 0, 0, 0 },  // SUB
+        { CTRL_MEM_IN | CTRL_PC_OUT, CTRL_RAM_OUT | CTRL_INST_IN | CTRL_PC_ENABLE, CTRL_INST_OUT | CTRL_MEM_IN, CTRL_REG_A_OUT | CTRL_RAM_IN, 0, 0, 0, 0 },  // STA
+        { CTRL_MEM_IN | CTRL_PC_OUT, CTRL_RAM_OUT | CTRL_INST_IN | CTRL_PC_ENABLE, CTRL_INST_OUT | CTRL_REG_A_IN, 0, 0, 0, 0, 0 },  // LDI
+        { CTRL_MEM_IN | CTRL_PC_OUT, CTRL_RAM_OUT | CTRL_INST_IN | CTRL_PC_ENABLE, CTRL_INST_OUT | CTRL_JUMP, 0, 0, 0, 0, 0 },  // JMP
+        { CTRL_MEM_IN | CTRL_PC_OUT, CTRL_RAM_OUT | CTRL_INST_IN | CTRL_PC_ENABLE, 0, 0, 0, 0, 0, 0 },  // JC
+        { CTRL_MEM_IN | CTRL_PC_OUT, CTRL_RAM_OUT | CTRL_INST_IN | CTRL_PC_ENABLE, 0, 0, 0, 0, 0, 0 },  // JZ
+        { CTRL_MEM_IN | CTRL_PC_OUT, CTRL_RAM_OUT | CTRL_INST_IN | CTRL_PC_ENABLE, 0, 0, 0, 0, 0, 0 },  // Custom instruction slot
+        { CTRL_MEM_IN | CTRL_PC_OUT, CTRL_RAM_OUT | CTRL_INST_IN | CTRL_PC_ENABLE, 0, 0, 0, 0, 0, 0 },  // Custom instruction slot
+        { CTRL_MEM_IN | CTRL_PC_OUT, CTRL_RAM_OUT | CTRL_INST_IN | CTRL_PC_ENABLE, 0, 0, 0, 0, 0, 0 },  // Custom instruction slot
+        { CTRL_MEM_IN | CTRL_PC_OUT, CTRL_RAM_OUT | CTRL_INST_IN | CTRL_PC_ENABLE, 0, 0, 0, 0, 0, 0 },  // Custom instruction slot
+        { CTRL_MEM_IN | CTRL_PC_OUT, CTRL_RAM_OUT | CTRL_INST_IN | CTRL_PC_ENABLE, 0, 0, 0, 0, 0, 0 },  // Custom instruction slot
+        { CTRL_MEM_IN | CTRL_PC_OUT, CTRL_RAM_OUT | CTRL_INST_IN | CTRL_PC_ENABLE, CTRL_REG_A_OUT | CTRL_OUTPUT_IN, 0, 0, 0, 0, 0 },  // OUT
+        { CTRL_MEM_IN | CTRL_PC_OUT, CTRL_RAM_OUT | CTRL_INST_IN | CTRL_PC_ENABLE, CTRL_HALT, 0, 0, 0, 0, 0 },  // HLT
+    };
 
-
-/*
- * Read a byte from the EEPROM at the specified address.
- */
-byte readEEPROM(int address) {
-  for (int pin = EEPROM_D0; pin <= EEPROM_D7; pin += 1) {
-    pinMode(pin, INPUT);
-  }
-  setAddress(address, /*outputEnable*/ true);
-
-  byte data = 0;
-  for (int pin = EEPROM_D7; pin >= EEPROM_D0; pin -= 1) {
-    data = (data << 1) + digitalRead(pin);
-  }
-  return data;
-}
-
-
-/*
- * Write a byte to the EEPROM at the specified address.
- */
-void writeEEPROM(int address, byte data) {
-  setAddress(address, /*outputEnable*/ false);
-  for (int pin = EEPROM_D0; pin <= EEPROM_D7; pin += 1) {
-    pinMode(pin, OUTPUT);
-  }
-
-  for (int pin = EEPROM_D0; pin <= EEPROM_D7; pin += 1) {
-    digitalWrite(pin, data & 1);
-    data = data >> 1;
-  }
-  digitalWrite(WRITE_EN, LOW);
-  delayMicroseconds(1);
-  digitalWrite(WRITE_EN, HIGH);
-  delay(10);
-}
-
-
-/*
- * Read the contents of the EEPROM and print them to the serial monitor.
- */
-void printContents() {
-  for (int base = 0; base <= 255; base += 16) {
-    byte data[16];
-    for (int offset = 0; offset <= 15; offset += 1) {
-      data[offset] = readEEPROM(base + offset);
+    for (int flags = 0; flags < 4; flags++) {
+        memcpy(microcode[flags], baseTemplate, sizeof(baseTemplate));
     }
 
-    char buf[80];
-    sprintf(buf, "%03x:  %02x %02x %02x %02x %02x %02x %02x %02x   %02x %02x %02x %02x %02x %02x %02x %02x",
-            base, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15]);
-
-    Serial.println(buf);
-  }
+    microcode[FLAGS_ZF0_CF1][7][2] = CTRL_INST_OUT | CTRL_JUMP;  // JC
+    microcode[FLAGS_ZF1_CF0][8][2] = CTRL_INST_OUT | CTRL_JUMP;  // JZ
+    microcode[FLAGS_ZF1_CF1][7][2] = CTRL_INST_OUT | CTRL_JUMP;  // JC
+    microcode[FLAGS_ZF1_CF1][8][2] = CTRL_INST_OUT | CTRL_JUMP;  // JZ
 }
 
+// Shifts and sets the address
+void setEEPROMAddress(int address, bool enableOutput) {
+    shiftOut(DATA_PIN, CLOCK_PIN, MSBFIRST, (address >> 8) | (enableOutput ? 0x00 : 0x80));
+    shiftOut(DATA_PIN, CLOCK_PIN, MSBFIRST, address);
+
+    digitalWrite(LATCH_PIN, LOW);
+    digitalWrite(LATCH_PIN, HIGH);
+    digitalWrite(LATCH_PIN, LOW);
+}
+
+// EEPROM read/write helpers
+byte readEEPROM(int address) {
+    for (int pin = EEPROM_START; pin <= EEPROM_END; ++pin) {
+        pinMode(pin, INPUT);
+    }
+
+    setEEPROMAddress(address, true);
+
+    byte value = 0;
+    for (int pin = EEPROM_END; pin >= EEPROM_START; --pin) {
+        value = (value << 1) | digitalRead(pin);
+    }
+    return value;
+}
+
+void writeEEPROM(int address, byte data) {
+    setEEPROMAddress(address, false);
+    for (int pin = EEPROM_START; pin <= EEPROM_END; ++pin) {
+        pinMode(pin, OUTPUT);
+    }
+
+    for (int pin = EEPROM_START; pin <= EEPROM_END; ++pin) {
+        digitalWrite(pin, data & 1);
+        data >>= 1;
+    }
+
+    digitalWrite(WRITE_ENABLE_PIN, LOW);
+    delayMicroseconds(1);
+    digitalWrite(WRITE_ENABLE_PIN, HIGH);
+    delay(10);
+}
+
+// Print EEPROM contents to serial
+void printEEPROMContents(int start, int length) {
+    for (int base = start; base < length; base += 16) {
+        char buffer[80];
+        sprintf(buffer, "%03X:", base);
+        for (int offset = 0; offset < 16; ++offset) {
+            byte value = readEEPROM(base + offset);
+            sprintf(buffer + strlen(buffer), " %02X", value);
+        }
+        Serial.println(buffer);
+    }
+}
 
 void setup() {
-  // put your setup code here, to run once:
-  pinMode(SHIFT_DATA, OUTPUT);
-  pinMode(SHIFT_CLK, OUTPUT);
-  pinMode(SHIFT_LATCH, OUTPUT);
-  digitalWrite(WRITE_EN, HIGH);
-  pinMode(WRITE_EN, OUTPUT);
-  Serial.begin(57600);
+    setupMicrocodeTemplate();
 
-  // Program data bytes
-  Serial.print("Programming EEPROM");
+    pinMode(DATA_PIN, OUTPUT);
+    pinMode(CLOCK_PIN, OUTPUT);
+    pinMode(LATCH_PIN, OUTPUT);
+    digitalWrite(WRITE_ENABLE_PIN, HIGH);
+    pinMode(WRITE_ENABLE_PIN, OUTPUT);
 
-  // Program the 8 high-order bits of microcode into the first 128 bytes of EEPROM
-  for (int address = 0; address < sizeof(data)/sizeof(data[0]); address += 1) {
-    writeEEPROM(address, data[address] >> 8);
+    Serial.begin(57600);
 
-    if (address % 64 == 0) {
-      Serial.print(".");
+    for (int address = 0; address < 1024; ++address) {
+        int flags = (address >> 8) & 0b11;
+        int step = address & 0b111;
+        int instruction = (address >> 3) & 0b1111;
+        int highBit = (address >> 7) & 1;
+
+        byte data = highBit ? microcode[flags][instruction][step] : (microcode[flags][instruction][step] >> 8);
+        writeEEPROM(address, data);
+
+        if (address % 64 == 0) {
+            Serial.print(".");
+        }
     }
-  }
 
-  // Program the 8 low-order bits of microcode into the second 128 bytes of EEPROM
-  for (int address = 0; address < sizeof(data)/sizeof(data[0]); address += 1) {
-    writeEEPROM(address + 128, data[address]);
-
-    if (address % 64 == 0) {
-      Serial.print(".");
-    }
-  }
-
-  Serial.println(" done");
-
-
-  // Read and print out the contents of the EERPROM
-  Serial.println("Reading EEPROM");
-  printContents();
+    Serial.println("Programming complete.");
+    printEEPROMContents(0, 102);
 }
 
-
-void loop() {
-  // put your main code here, to run repeatedly:
-
+void loop(){
+  
 }
